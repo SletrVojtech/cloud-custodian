@@ -1,6 +1,7 @@
 import argparse
 import logging
 import sys
+import yaml
 
 from c7n.config import Config
 from c7n.policy import PolicyCollection
@@ -9,6 +10,9 @@ from c7n.provider import clouds
 from c7n.cli import _setup_logger
 
 from typing import List
+import tools.data_collector.policy_templates.aws_template as aws_template
+import tools.data_collector.policy_templates.azure_template as azure_template
+
 # Import to register the custom execution mode
 from policy import InMemoryPullMode
 
@@ -16,7 +20,7 @@ from policy import InMemoryPullMode
 log = logging.getLogger('custodian.commands')
 
 # Policy definition template
-POLICY_DATA = {
+"""POLICY_DATA = {
     "policies": [
         {
             'name': 'CPU-util-check',
@@ -29,28 +33,20 @@ POLICY_DATA = {
                 'threshold': 0, 
                 'timeframe': 1, 
                 'interval': 'PT5M'
-                },
-                {
-                'type': 'metric',
-                'metric': 'Percentage CPU', 
-                'aggregation': 'maximum', 
-                'op': 'ge', 
-                'threshold': 0, 
-                'timeframe': 1, 
-                'interval': 'PT5M'
-                }],
-        },
+                },]
+        },{'name': 'AWS-util-check', 'resource': 'aws.ec2', 'filters': [{'type': 'metrics', 'name': 'CPUUtilization', 'days': 0.05, 'period': 60, 'value': 0, 'op': 'ge'}]}
     ]
-}
+}"""
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run Cloud Custodian policies in-memory")
-    parser.add_argument('--region', default='us-east-1', help='Region to target')
+    parser.add_argument('--region', default='all', help='Region to target')
     parser.add_argument("-v", "--verbose", action="count", help="Verbose Logging")
     parser.add_argument("-q", "--quiet", action="count", help="Less logging (repeatable)")
     parser.add_argument("-s", "--output_dir",  default='.log',
                        help="Directory mainly for log outputs.")
+    parser.add_argument("-m", "--metrics", default="metrics.yml", help="Metrics configuration file")
 
     args = parser.parse_args()
 
@@ -64,6 +60,21 @@ def main():
         )
 
     try:
+        with open(args.metrics, 'r') as f:
+            metrics_conf = yaml.safe_load(f)
+
+        policies_list = []
+        for m in metrics_conf.get('metrics', []):
+            if m['provider'] == 'aws':
+                policies_list.append(aws_template.aws_policy_crafter(
+                    m['resource'], m['metric'], m.get('period', 300)))
+            elif m['provider'] == 'azure':
+                policies_list.append(azure_template.azure_policy_crafter(
+                    m['resource'], m['metric'], m.get('interval', 'PT5M')))
+
+        POLICY_DATA = {
+            "policies": policies_list
+        }
         # Load policies from internal dictionary
         loader = PolicyLoader(options)
         collection = loader.load_data(POLICY_DATA, "in-memory", validate=True)
@@ -108,7 +119,7 @@ def main():
         print(f"Running policy: {policy.name} (resource: {p.resource_type})")
         try:
             # Execute the policy
-            #resources = p.run()
+            # resources = p.run()
             resources = policy()
 
             print(f"  Matched {len(resources)} resources")
