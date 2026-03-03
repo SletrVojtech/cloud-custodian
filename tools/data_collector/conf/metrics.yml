@@ -1,0 +1,8 @@
+measure:
+  - resource: azure.vm
+    measurement:
+      - metric: Percentage CPU
+      - metric: Percentage RAM
+  - resource: aws.ec2
+    measurement:
+      - metric: CPUUtilization
