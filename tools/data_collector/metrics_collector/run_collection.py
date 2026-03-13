@@ -14,9 +14,15 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from c7n_org.cli import init, resolve_regions, accounts_iterator
 from tools.data_collector.policy_templates.policy_crafter import CrafterFactory
 from tools.data_collector.policy import InMemoryPullMode
+from tools.data_collector.rabbitmq.connector import RabbitMQClient
+from tools.data_collector.rabbitmq.message import IngestionMessage
+from tools.data_collector.metrics_collector.message_adapters import AwsAdapter, AzureAdapter
+
+
 
 log = logging.getLogger('metrics_collector')
 
+#TODO Split apart
 def run_account_in_memory(account, region, policy_data, output_dir, debug=False):
     """
         Worker function based on c7n_org.cli.run_account. 
@@ -25,7 +31,7 @@ def run_account_in_memory(account, region, policy_data, output_dir, debug=False)
         # Setup configuration options
     options = Config.empty(
         region=region,
-        output_dir=output_dir,  # No output directory needed for in-memory execution
+        output_dir=output_dir,  # directory for Custodian policy logs.
         metrics_enabled=False,
         )
 
@@ -48,60 +54,92 @@ def run_account_in_memory(account, region, policy_data, output_dir, debug=False)
     # Isolated environment variables
     with environ(**env_vars):
         loader = PolicyLoader(options)
-        policy_provider = "*" + account.get('provider') + "*"
+        provider = account.get('provider')
+        policy_provider = "*" + provider + "*"
             
         collection = loader.load_data(policy_data, "in-memory").filter(policy_patterns=[policy_provider])
+        with RabbitMQClient() as mq_client:
+            for policy in collection:
+                # Force in-memory-pull
+                if policy.data.get('mode', {}).get('type', 'pull') == 'pull':
+                    policy.data['mode'] = {'type': 'in-memory-pull'}
+                policy.data['regions'] = [region]
+                # Expand variables (e.g. {account_id}, {region}) in the policy
+                policy.expand_variables(policy.get_variables())
+                # Extend policy execution conditions with account information
+                policy.conditions.env_vars['account'] = account
+                # Variable expansion and non schema validation (not optional)
+                policy.expand_variables(policy.get_variables(account.get('vars', {})))
+                log.debug(
+                    "Running policy:%s account:%s region:%s",
+                    policy.name, account['name'], region)
+                try:
+                    # In memory execution
+                    st = time.time()
+                    resources = policy() 
+                    policy_counts[policy.name] = resources and len(resources) or 0
+                    if not resources:
+                        return policy_counts, success
+                    res_type = policy.resource_type
+                    # Parse each returned resource into a RabbitMQ message
+                    for raw_resource in resources:
+                            if provider == 'aws':
+                                adapter = AwsAdapter(
+                                    raw_resource, 
+                                    account_id=account.get('account_id', 'unknown'),
+                                    resource_type=res_type,
+                                    region_name=region,
+                                    policy_name=policy.name
+                                )
+                            elif provider == 'azure':
+                                adapter = AzureAdapter(
+                                    raw_resource,
+                                    resource_type=res_type,
+                                    policy_name=policy.name
+                                )
+                            else:
+                                log.warning(f"Unknown cloud provider: {provider}")
+                                continue
+                            
+                            metrics_payload = adapter.to_payload()
+                            
+                            msg = IngestionMessage(
+                                source_module="custodian",
+                                payload=metrics_payload.model_dump()
+                            )
+                            
+                            mq_client.publish(
+                                queue_name="metrics_ingestion", 
+                                message=msg.model_dump_json()
+                            )
 
-        for policy in collection:
-            # Force in-memory-pull
-            if policy.data.get('mode', {}).get('type', 'pull') == 'pull':
-                policy.data['mode'] = {'type': 'in-memory-pull'}
-            policy.data['regions'] = [region]
-            # Expand variables (e.g. {account_id}, {region}) in the policy
-            policy.expand_variables(policy.get_variables())
-            # Extend policy execution conditions with account information
-            policy.conditions.env_vars['account'] = account
-            # Variable expansion and non schema validation (not optional)
-            policy.expand_variables(policy.get_variables(account.get('vars', {})))
-            log.debug(
-                "Running policy:%s account:%s region:%s",
-                policy.name, account['name'], region)
-            try:
-                # In memory execution
-                st = time.time()
-                resources = policy() 
-                policy_counts[policy.name] = resources and len(resources) or 0
-                # parse results 
-                print(resources)
+                    log.info(
+                        "Ran account:%s region:%s policy:%s matched:%d time:%0.2f",
+                        account['name'], region, policy.name, len(resources),
+                        time.time() - st)
+                    
 
-
-                log.info(
-                    "Ran account:%s region:%s policy:%s matched:%d time:%0.2f",
-                    account['name'], region, policy.name, len(resources),
-                    time.time() - st)
-                
-
-            except ClientError as e:
-                success = False
-                if e.response['Error']['Code'] == 'AccessDenied':
-                    log.warning('Access denied api:%s policy:%s account:%s region:%s',
-                                e.operation_name, policy.name, account['name'], region)
-                    return policy_counts, success
-                log.error(
-                    "Exception running policy:%s account:%s region:%s error:%s",
-                    policy.name, account['name'], region, e)
-                continue
-            except Exception as e:
-                success = False
-                log.error(
-                    "Exception running policy:%s account:%s region:%s error:%s",
-                    policy.name, account['name'], region, e)
-                if not debug:
+                except ClientError as e:
+                    success = False
+                    if e.response['Error']['Code'] == 'AccessDenied':
+                        log.warning('Access denied api:%s policy:%s account:%s region:%s',
+                                    e.operation_name, policy.name, account['name'], region)
+                        return policy_counts, success
+                    log.error(
+                        "Exception running policy:%s account:%s region:%s error:%s",
+                        policy.name, account['name'], region, e)
                     continue
-                import traceback, pdb, sys
-                traceback.print_exc()
-                pdb.post_mortem(sys.exc_info()[-1])
-                raise
+                except Exception as e:
+                    success = False
+                    log.error(
+                        "Exception running policy:%s account:%s region:%s error:%s",
+                        policy.name, account['name'], region, e)
+                    if not debug:
+                        continue
+                    import traceback, pdb, sys
+                    traceback.print_exc()
+                    pdb.post_mortem(sys.exc_info()[-1])
+                    raise
 
     return policy_counts, success
 

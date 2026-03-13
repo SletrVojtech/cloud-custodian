@@ -1,23 +1,51 @@
 from abc import ABC, abstractmethod
+import string
 
 class PolicyCrafter(ABC):
     """Abstract class for supported providers"""
-    
+
+    def craft_name(self, resource, metric ):
+        # Based on https://www.digitalocean.com/community/tutorials/python-remove-spaces-from-string
+        s = resource + '_' + metric
+        replacements = str.maketrans(
+            {" ": "_", ".": "_", "-": "_", "/": "_", "\\": "_"}
+            | {ord(c): None for c in string.whitespace})
+        return s.translate(replacements)
+            
     @abstractmethod
     def craft(self, resource, metric, period):
         pass
 
 class AWSPolicyCrafter(PolicyCrafter):
+    def _get_period(period: str):
+        """
+        Based on allowed granularity for Azure policies in c7n_azure.filters.schema
+        Enumerates to seconds, default is 5 minutes.
+        """
+        period_dict = {
+            'PT5M': 300,
+            'PT15M': 900,
+            'PT30M': 1800,
+            'PT1H': 3600,
+            'PT6H': 21600,
+            'PT12H': 43200,
+            'P1D': 86400,
+        }
+        return period_dict.get(period, 300)
+
+
     def craft(self,resource: str, metric: str, period: str = 'PT5M'):
         POLICY_DATA = {
-        'name': 'aws_resource_loader_'+metric.replace(' ', '_'), 
+        'name': self.craft_name(resource,metric), 
         'resource': resource, 
         'filters': [{
              'type': 'metrics', 
              'name': metric, 
              'days': 0.5, 
-             'period': 300, 
-             'value': 0, 
+             'period': self._get_period(period), 
+             'value': 0,
+             'missing-value': 0,
+             'statistics': 'Average',
              'op': 'ge'
              }]
         }
@@ -26,7 +54,7 @@ class AWSPolicyCrafter(PolicyCrafter):
 class AzurePolicyCrafter(PolicyCrafter):
     def craft(self, resource: str, metric: str, period: str = 'PT5M'):
         POLICY_DATA = {
-            'name': 'azure_resource_loader_'+metric.replace(' ', '_'),
+            'name':  self.craft_name(resource,metric),
             'resource': resource,
             'filters': [{
                 'type': 'metric',
@@ -35,7 +63,8 @@ class AzurePolicyCrafter(PolicyCrafter):
                 'op': 'ge', 
                 'threshold': 0, 
                 'timeframe': 1, 
-                'interval': period
+                'interval': period,
+                'no_data_action': 'to_zero'
                 },]
         }
         return POLICY_DATA
