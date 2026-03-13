@@ -62,3 +62,11 @@ venv*/
 
 # files generated during "make data-update"
 iam_docs/
+
+.log/*
+accounts.yml
+subscriptions.yml
+output/*
+.envvars
+*.csv
+*.gz
