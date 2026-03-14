@@ -1,18 +1,19 @@
 
 CREATE TABLE Entities (
-    id SERIAL PRIMARY KEY,             
+    Id SERIAL PRIMARY KEY,             
     ExternalId VARCHAR(255) UNIQUE,    
     ResourceName VARCHAR(255),
     ResourceType VARCHAR(50),                   -- 'account', 'group', 'resource'
     ParentId INTEGER REFERENCES Entities(Id),
     ProviderName VARCHAR(20),          -- AWS, Azure, K8s
+    MetaHash INT,
     Tags JSONB,
     Extras JSONB,
 );
 
 
 CREATE TABLE Costs (
-    id SERIAL PRIMARY KEY,
+    Id BIGSERIAL,
     EntityId INTEGER REFERENCES Entities(Id),
     BilledCost DOUBLE PRECISION,
     BillingCurrency VARCHAR(3) DEFAULT 'EUR',
@@ -23,7 +24,7 @@ CREATE TABLE Costs (
     SkuPriceId VARCHAR(255),
     
     -- for fast UPSERTS, some data needs to be pre-aggregated.
-    CONSTRAINT uq_entity_charge_sku UNIQUE (EntityId, ChargePeriodStart, ServiceName, SkuPriceId)
+    PRIMARY KEY(EntityId, ChargePeriodStart, ServiceName, SkuPriceId)
 )WITH(
     tsdb.hypertable,
     tsdb.segmentby = 'EntityId',
@@ -39,12 +40,14 @@ CREATE TABLE Budgets (
 
 
 CREATE TABLE Metrics (
-    Id BIGSERIAL PRIMARY KEY,
+    Id BIGSERIAL,
     Timestamp TIMESTAMP WITH TIME ZONE,
     EntityId INTEGER REFERENCES Entities(Id),
     IntervalMinutes INTEGER,
     MetricType VARCHAR,
     Value DOUBLE PRECISION
+
+    PRIMARY KEY (EntityId, MetricType, Timestamp)
 )WITH(
     tsdb.hypertable,
     tsdb.segmentby = ̈́'EntityId',

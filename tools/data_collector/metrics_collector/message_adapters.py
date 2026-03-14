@@ -56,6 +56,7 @@ class BaseCloudAdapter(ABC):
             resource_type=self.get_resource_type(),
             resource_name=self.get_resource_name(),
             metric_name=self.get_metric_name(),
+            metric_period = 5,
             billing_account_id=self.get_billing_account_id(),
             region_name=self.get_region_name(),
             tags=self.get_tags(),
