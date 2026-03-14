@@ -1,11 +1,14 @@
 import yaml
 import sys
 import logging
+import glob
+import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from collections import Counter
-
 from c7n_org.cli import init, accounts_iterator
 from tools.data_collector.cost_collector.downloaders import run_aws_worker_process, run_azure_worker_process
+from tools.data_collector.rabbitmq.connector import RabbitMQClient
+from tools.data_collector.cost_collector.data_loader import CostDataLoader
+
 
 log = logging.getLogger("cost_export_downloader")
 
@@ -87,7 +90,19 @@ def run_cost_downloads(output_dir="/tmp/cost_exports"):
     log.info(f"Download finished, total files: {len(all_downloaded_files)}")
     
     if all_downloaded_files:
-        print(all_downloaded_files)
+        log.info("Loading files into RabbitMQ.")
+        with RabbitMQClient() as mq_client:
+            loader = CostDataLoader(rmq_client=mq_client, queue_name="data_ingestion")
+
+            for folder_name in os.listdir(output_dir):
+                folder_path = os.path.join(output_dir, folder_name)
+                
+                if os.path.isdir(folder_path):
+                    # include csv and csv.gz
+                    file_pattern = os.path.join(folder_path, "*.csv*")
+                    loader.process_and_publish(file_pattern, days_back=7)
+        log.info("Finished loading files into RabbitMQ.")
+
 
     if not success:
         sys.exit(1)
