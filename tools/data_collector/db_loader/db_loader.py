@@ -2,6 +2,7 @@ import logging
 from psycopg2.extras import execute_values
 from tools.data_collector.rabbitmq.message import IngestionMessage
 from tools.data_collector.db_loader.metrics_processor import MetricsProcessor
+from tools.data_collector.db_loader.cost_processor import CostsProcessor
 
 
 log = logging.getLogger('DB_loader')
@@ -11,7 +12,7 @@ class DBLoader:
         self.db = db_conn
         self.mq = mq_channel
 
-    def start_consuming(self, queue_name="metrics_ingestion"):
+    def start_consuming(self, queue_name="data_ingestion"):
         """Main consumer loop"""
         self.mq.basic_qos(prefetch_count=50)
         self.mq.basic_consume(
@@ -30,6 +31,9 @@ class DBLoader:
             # Switch upon source module
             if envelope.source_module == "custodian":
                 processor = MetricsProcessor(self.db)
+                processor.process(envelope)
+            elif envelope.source_module == "cost_export":
+                processor = CostsProcessor(self.db)
                 processor.process(envelope)
             else:
                 log.warning(f"Unsupported module: {envelope.source_module}")
